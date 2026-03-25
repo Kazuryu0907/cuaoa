@@ -25,7 +25,7 @@ CudaDeviceInfoResult getCudaDevicesInfo() {
 
   for (int i = 0; i < numDevices; i++) {
     cudaDeviceProp prop;
-    cudaGetDeviceProperties_v2(&prop, i);
+    cudaGetDeviceProperties(&prop, i);
 
     CudaDeviceInfo info;
     info.id = i;

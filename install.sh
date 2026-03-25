@@ -34,7 +34,7 @@ execute_command() {
 }
 
 echo -e "${LINK}${NC} Installing the ${GREEN}custatevec${NC} and ${GREEN}lbfgs${NC} libraries${NC}"
-conda install custatevec conda-forge::liblbfgs
+conda install -y custatevec conda-forge::liblbfgs
 # execute_command "pip install maturin[patchelf]" "Installing the ${GREEN}maturin${NC} build tool with ${GREEN}patchelf${NC}" "$PUZZLE"
 # execute_command "maturin build --release" "Building the project from source... (this might take a while)" "$GEAR "
 execute_command "uv build" "Building the project from source... (this might take a while)" "$GEAR "

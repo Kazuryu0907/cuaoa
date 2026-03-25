@@ -1,59 +1,114 @@
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04
+# ─────────────────────────────────────────────────────────────────────────────
+# Build arguments (override at build time):
+#   CUDA_VERSION  – CUDA base image version (default: 12.8.1)
+#   CUDA_ARCH     – GPU compute capability digits (default: 90 for H100)
+#                   Common values: 70=V100  80=A100  86=RTX30/40  90=H100
+#
+# Example (H100):
+#   docker build --build-arg CUDA_ARCH=90 -t cuaoa:h100 .
+# Example (A100):
+#   docker build --build-arg CUDA_ARCH=80 -t cuaoa:a100 .
+# ─────────────────────────────────────────────────────────────────────────────
+ARG CUDA_VERSION=12.8.1
 
-ARG MINIFORGE_NAME=Miniforge3
+# ═════════════════════════════════════════════════════════════════════════════
+# Stage 1 – builder: Rust/CUDA コンパイル + Python wheel 生成
+# ═════════════════════════════════════════════════════════════════════════════
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS builder
+
+ARG CUDA_ARCH=90
 ARG MINIFORGE_VERSION=24.9.2-0
-ARG TARGETPLATFORM
 
 ENV NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    CONDA_DIR=/opt/conda \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    TZ=Etc/UTC
+ENV PATH="${CONDA_DIR}/bin:${PATH}"
 
-ENV CONDA_DIR=/opt/conda
-ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
-ENV PATH=${CONDA_DIR}/bin:${PATH}
+# ── System dependencies ──────────────────────────────────────────────────────
+RUN apt-get update && apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+        curl git wget make g++ && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN apt update && apt upgrade -y && \
-    apt install -y --no-install-recommends \
-    curl \
-    git \
-    wget && \
-    apt clean && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN wget --no-hsts --quiet https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/${MINIFORGE_NAME}-${MINIFORGE_VERSION}-Linux-$(uname -m).sh -O /tmp/miniforge.sh && \
-    /bin/bash /tmp/miniforge.sh -b -p ${CONDA_DIR} && \
+# ── Miniforge (conda) ────────────────────────────────────────────────────────
+RUN wget --no-hsts --quiet \
+    "https://github.com/conda-forge/miniforge/releases/download/${MINIFORGE_VERSION}/Miniforge3-${MINIFORGE_VERSION}-Linux-x86_64.sh" \
+    -O /tmp/miniforge.sh && \
+    bash /tmp/miniforge.sh -b -p "${CONDA_DIR}" && \
     rm /tmp/miniforge.sh && \
-    conda clean --tarballs --index-cache --packages --yes && \
-    find ${CONDA_DIR} -follow -type f -name '*.a' -delete && \
-    find ${CONDA_DIR} -follow -type f -name '*.pyc' -delete && \
-    conda clean --force-pkgs-dirs --all --yes  && \
-    echo ". ${CONDA_DIR}/etc/profile.d/conda.sh && conda activate base" >> /etc/skel/.bashrc && \
-    echo ". ${CONDA_DIR}/etc/profile.d/conda.sh && conda activate base" >> ~/.bashrc
+    conda clean --all -y
 
+# ── conda env: Python 3.11 + custatevec + liblbfgs ──────────────────────────
+RUN conda create -n cuaoa python=3.11 -y && \
+    "${CONDA_DIR}/bin/conda" install -n cuaoa -y \
+        custatevec \
+        "conda-forge::liblbfgs" && \
+    conda clean --all -y
+
+# ── maturin + patchelf (ビルドツール) ────────────────────────────────────────
+RUN "${CONDA_DIR}/envs/cuaoa/bin/pip" install --no-cache-dir "maturin[patchelf]"
+
+# ── Rust toolchain ───────────────────────────────────────────────────────────
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-ADD https://astral.sh/uv/install.sh /uv-installer.sh
-RUN sh /uv-installer.sh && rm /uv-installer.sh
-ENV PATH="/root/.local/bin/:$PATH"
+# ── ソースコード ─────────────────────────────────────────────────────────────
+COPY . /build/cuaoa
+WORKDIR /build/cuaoa
 
-RUN . ${CONDA_DIR}/etc/profile.d/conda.sh && conda config --set auto_activate_base false
-RUN . ${CONDA_DIR}/etc/profile.d/conda.sh && conda create -n cuaoa python=3.11 -y
+# ── Wheel ビルド ─────────────────────────────────────────────────────────────
+# CONDA_PREFIX: cuaoa 環境のライブラリパスを build.rs / Makefile に伝える
+# CUDA_ARCH:    Makefile の NVCC_FLAGS (-arch=sm_XX) に渡る
+RUN CONDA_PREFIX="${CONDA_DIR}/envs/cuaoa" \
+    CUDA_ARCH=${CUDA_ARCH} \
+    "${CONDA_DIR}/envs/cuaoa/bin/maturin" build --release \
+        --interpreter "${CONDA_DIR}/envs/cuaoa/bin/python3.11"
 
-RUN echo "conda deactivate" >> ~/.bashrc
-RUN echo "source ~/cuaoa/.venv/bin/activate" >> ~/.bashrc
+# ── conda env に wheel をインストール ────────────────────────────────────────
+RUN "${CONDA_DIR}/envs/cuaoa/bin/pip" install --no-cache-dir target/wheels/*.whl
 
-RUN echo "\necho \"============================\nCUAOA License and Compliance\n============================\n\nThe CUAOA project is licensed under the Apache License 2.0. See the /LICENSE file for details.\nAlternatively the LICENSE can be obtained here: https://github.com/JFLXB/cuaoa/blob/main/LICENSE\n\nBy using this software, you agree to comply with the licenses of all dependencies used in this project.\nNotably, the cuStateVec library has its own licensing terms which must be adhered to:\nhttps://docs.nvidia.com/cuda/cuquantum/latest/license.html\n\"" >> /etc/bash.bashrc
+# ═════════════════════════════════════════════════════════════════════════════
+# Stage 2 – runtime: 実行専用の軽量イメージ
+# ═════════════════════════════════════════════════════════════════════════════
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
 
-COPY . /root/cuaoa
-RUN cp /root/cuaoa/LICENSE /root/LICENSE
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    DEBIAN_FRONTEND=noninteractive \
+    TZ=Etc/UTC \
+    CONDA_DIR=/opt/conda \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    CONDA_DEFAULT_ENV=cuaoa \
+    CONDA_PREFIX=/opt/conda/envs/cuaoa
+
+# conda の Python を優先パスに追加（bashrc 依存を排除）
+ENV PATH="/opt/conda/envs/cuaoa/bin:/opt/conda/bin:${PATH}"
+
+# ── builder から conda env ごとコピー ────────────────────────────────────────
+# custatevec / liblbfgs / pycuaoa wheel がすべて含まれる
+COPY --from=builder /opt/conda /opt/conda
+
+# ── 実行スクリプト ───────────────────────────────────────────────────────────
+COPY --from=builder /build/cuaoa /root/cuaoa
 
 WORKDIR /root/cuaoa
-RUN . ${CONDA_DIR}/etc/profile.d/conda.sh && conda activate cuaoa && ./install.sh --verbose
-RUN . ${CONDA_DIR}/etc/profile.d/conda.sh && conda activate cuaoa && uv sync
 
-WORKDIR /root
+# ライセンス表示
+RUN echo "\n\
+============================\n\
+CUAOA License and Compliance\n\
+============================\n\
+The CUAOA project is licensed under the Apache License 2.0.\n\
+See /root/cuaoa/LICENSE for details.\n\
+The cuStateVec library has its own licensing terms:\n\
+https://docs.nvidia.com/cuda/cuquantum/latest/license.html\n\
+" > /etc/cuaoa-license.txt
 
+# ── 起動 ─────────────────────────────────────────────────────────────────────
 CMD ["/bin/bash"]

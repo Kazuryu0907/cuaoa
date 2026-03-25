@@ -2,8 +2,11 @@ CUDA_PATH ?= /usr/local/cuda
 NVCC := $(CUDA_PATH)/bin/nvcc
 GPP := g++
 
+# GPU architecture: override via environment variable CUDA_ARCH (e.g. CUDA_ARCH=90 for H100)
+CUDA_ARCH ?= 86
+
 # Compiler and linker flags
-NVCC_FLAGS := -std=c++20 -arch=sm_86 --expt-relaxed-constexpr -Xcompiler -fPIC,-O3
+NVCC_FLAGS := -std=c++20 -arch=sm_$(CUDA_ARCH) --expt-relaxed-constexpr -Xcompiler -fPIC,-O3
 GPP_FLAGS := -Iinclude -std=c++20 -march=native -O3 -Wall -fPIC -fopenmp -flto
 LD_FLAGS := -L$(CUDA_PATH)/lib64 -L$(CONDA_PREFIX)/lib -lcudart -lcustatevec -llbfgs -lstdc++ -lgomp
 
