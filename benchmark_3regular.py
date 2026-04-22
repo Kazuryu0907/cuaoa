@@ -145,8 +145,8 @@ CONFIGS = [
     (20, 3, False),
 ]
 
-QAOA_DEPTHS  = [1]
-RQAOA_DEPTHS = [1]
+QAOA_DEPTHS  = [1, 2, 3]
+RQAOA_DEPTHS = [1, 2]
 N_CUTOFF     = 5
 N_SHOTS      = 2048
 
@@ -290,7 +290,7 @@ def run_benchmark():
         print(row)
 
     # JSON 保存
-    out_path = "../benchmark_3regular_results.json"
+    out_path = "../benchmark_3regular_p2_results.json"
     with open(out_path, "w") as f:
         json.dump(all_summaries, f, indent=2, ensure_ascii=False)
     print(f"\n結果を {out_path} に保存しました。")
