@@ -204,6 +204,12 @@ class RQAOA1Solver:
 
         Since the graph is unweighted (all edges have weight 1), we just
         transfer edges.  Multi-edges are collapsed to single edges.
+
+        FIXME(known bug, k>=3 only): the合成 shift `b_{ref,h} = (b_{elim,h} - shift) mod k`
+        は本来エッジ属性として保持し、次ステップの M_{ij}^{(b)} 評価に
+        引き継ぐ必要がある（Bravyi et al. 2022）。現状は unweighted 化して
+        shift を捨てているため、k>=3 の結果は厳密な L1-RQAOA から逸脱する。
+        k=2 (MaxCut) では shift が 1 種類しかないので影響なし。
         """
         new_g = nx.Graph()
         # Keep all nodes except `elim`
