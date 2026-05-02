@@ -74,37 +74,36 @@ class MaxKCutHamiltonian:
         """
         Compute h_{uv}(a) and ĥ_{uv}(b) for every edge.
 
-        For an edge (u,v):
+        For a vanilla (unweighted) edge (u,v):
             J_{uv}(b) = 1 - δ_{b,0}
-            h_{uv}(0) = (1/k)(k-1) = (k-1)/k
-            h_{uv}(a≠0) = (1/k)(0 - 1) = -1/k
+            h_{uv}(0) = (k-1)/k,  h_{uv}(a≠0) = -1/k
+            ĥ_{uv}(0) = 0,        ĥ_{uv}(b≠0) = 1
 
-        ĥ_{uv} is the DFT of h_{uv}:
-            ĥ_{uv}(b) = Σ_a h_{uv}(a) ω^{ab}
-            ĥ_{uv}(0) = Σ_a h_{uv}(a) = (k-1)/k - (k-1)/k = 0
-            ĥ_{uv}(b≠0) = 1  (can be verified by direct substitution)
+        For RQAOA-contracted edges the graph carries an ``h_hat``
+        edge attribute (a complex vector of length k) holding the
+        accumulated Fourier coefficients. We read those when present
+        and recover h via inverse DFT.
         """
         k = self.k
-        # Pre-compute h and h_hat for a single edge (same for all edges)
-        h_edge = np.empty(k, dtype=np.complex128)
-        h_edge[0] = (k - 1) / k
-        h_edge[1:] = -1.0 / k
+        # Default unweighted ĥ vector (ĥ(0)=0, ĥ(b≠0)=1)
+        h_hat_default = np.zeros(k, dtype=np.complex128)
+        h_hat_default[1:] = 1.0
 
-        # DFT: ĥ(b) = Σ_a h(a) ω^{ab}
-        a = np.arange(k)
-        h_hat_edge = np.array(
-            [np.sum(h_edge * self.omega ** (a * b)) for b in range(k)],
-            dtype=np.complex128,
-        )
-        # ĥ(0) should be exactly 0, ĥ(b≠0) should be exactly 1; enforce numerically
-        # (minor floating-point cleanup)
-        h_hat_edge = h_hat_edge.real.copy().astype(np.complex128)
-        # Convert to real since values are real for unweighted graphs
-        h_edge_real = h_edge.real.copy()
+        a_arr = np.arange(k)
+        # Inverse DFT matrix: h(a) = (1/k) Σ_b ĥ(b) ω^{-ab}
+        # Row a, column b → ω^{-ab} / k
+        ab = a_arr[:, None] * a_arr[None, :]
+        idft = self.omega ** (-ab) / k  # (k, k)
 
-        for u, v in self.graph.edges():
+        for u, v, data in self.graph.edges(data=True):
             key = self._canonical(u, v)
-            self._h[key] = h_edge_real.astype(np.complex128)
+            if "h_hat" in data:
+                h_hat_edge = np.asarray(data["h_hat"], dtype=np.complex128)
+            else:
+                h_hat_edge = h_hat_default.copy()
+            # h(a) = (1/k) Σ_b ĥ(b) ω^{-ab}
+            h_edge = idft @ h_hat_edge   # (k,)
+            self._h[key] = h_edge
             self._h_hat[key] = h_hat_edge
 
     # ------------------------------------------------------------------

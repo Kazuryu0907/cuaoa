@@ -196,40 +196,61 @@ class RQAOA1Solver:
         """
         Contract node `elim` into `ref` under constraint x_elim = x_ref + shift.
 
-        For each neighbour h of `elim` (h ≠ ref, h ≠ elim):
-            Add/update edge (ref, h) to graph.
-            The effective shift from ref to h is:
-                x_h - x_ref = (x_h - x_elim) + (x_elim - x_ref)
-                            = b_{elim,h} - shift  (if edge (elim,h) had shift b)
+        Each edge carries an ``h_hat`` attribute: a length-k complex
+        vector of Fourier coefficients ĥ_{u,v}(b). For a fresh
+        unweighted edge ĥ = (0, 1, …, 1).
 
-        Since the graph is unweighted (all edges have weight 1), we just
-        transfer edges.  Multi-edges are collapsed to single edges.
+        Substituting x_elim = x_ref + s into C_{elim,h} gives
+            new ĥ_{ref,h}(b) ← old ĥ_{ref,h}(b) + ĥ_{elim,h}((b − s) mod k)
 
-        FIXME(known bug, k>=3 only): the合成 shift `b_{ref,h} = (b_{elim,h} - shift) mod k`
-        は本来エッジ属性として保持し、次ステップの M_{ij}^{(b)} 評価に
-        引き継ぐ必要がある（Bravyi et al. 2022）。現状は unweighted 化して
-        shift を捨てているため、k>=3 の結果は厳密な L1-RQAOA から逸脱する。
-        k=2 (MaxCut) では shift が 1 種類しかないので影響なし。
+        which is the cyclic-shift accumulation used by Bravyi et al. 2022.
+        For k=2 there is only one non-trivial shift so the previous
+        unweighted-merge implementation happened to be correct; for
+        k≥3 the shift bookkeeping is essential.
         """
         new_g = nx.Graph()
-        # Keep all nodes except `elim`
         for node in graph.nodes():
             if node != elim:
                 new_g.add_node(node)
 
-        # Re-add all edges not involving `elim`
+        h_hat_default = np.zeros(k, dtype=np.complex128)
+        h_hat_default[1:] = 1.0
+
+        def edge_h_hat(g, u, v):
+            data = g.get_edge_data(u, v) or {}
+            if "h_hat" in data:
+                return np.asarray(data["h_hat"], dtype=np.complex128).copy()
+            return h_hat_default.copy()
+
+        # Carry over edges that don't involve elim
         for u, v in graph.edges():
             if u == elim or v == elim:
                 continue
-            new_g.add_edge(u, v)
+            new_g.add_edge(u, v, h_hat=edge_h_hat(graph, u, v))
 
-        # For edges (elim, h): add edge (ref, h) unless it already exists
+        # Process (elim, h) edges → contribute to (ref, h)
+        b_arr = np.arange(k)
+        shift_idx = (b_arr - shift) % k   # ĥ_{elim,h}((b-s) mod k)
         for h in graph.neighbors(elim):
             if h == ref:
                 continue
-            # Avoid self-loop (if h == ref already handled)
-            if not new_g.has_edge(ref, h) and ref != h:
-                new_g.add_edge(ref, h)
+            h_hat_jh = edge_h_hat(graph, elim, h)
+            shifted = h_hat_jh[shift_idx]
+            if new_g.has_edge(ref, h):
+                new_g[ref][h]["h_hat"] = (
+                    new_g[ref][h]["h_hat"] + shifted
+                )
+            elif ref != h:
+                new_g.add_edge(ref, h, h_hat=shifted)
+
+        # Drop edges whose ĥ collapsed to zero (numerical convention:
+        # edges with ĥ ≡ 0 contribute nothing to the cost)
+        zero_edges = [
+            (u, v) for u, v, d in new_g.edges(data=True)
+            if np.allclose(d.get("h_hat", h_hat_default), 0.0, atol=1e-12)
+        ]
+        for u, v in zero_edges:
+            new_g.remove_edge(u, v)
 
         return new_g
 
@@ -239,32 +260,39 @@ class RQAOA1Solver:
 
     def _brute_force(self, graph: nx.Graph, k: int) -> np.ndarray:
         """
-        Exactly solve MAX-k-CUT on a small graph by exhaustive search.
+        Exactly solve the (possibly contracted) MAX-k-CUT cost function
+        on a small graph by exhaustive search.
 
-        Returns
-        -------
-        coloring : np.ndarray, shape (n_nodes,)
-            Mapping from node index to colour; node order follows
-            sorted(graph.nodes()).
+        Each edge contributes ĥ_e((x_v − x_u) mod k) to the cost, where
+        ĥ_e is the per-edge Fourier coefficient vector. For a fresh
+        unweighted edge ĥ = (0, 1, …, 1), recovering 1{x_v ≠ x_u}.
+        For RQAOA-contracted edges ĥ encodes the cyclic-shift bookkeeping.
         """
         nodes = sorted(graph.nodes())
         n = len(nodes)
         node_to_idx = {node: i for i, node in enumerate(nodes)}
 
-        edges = [(node_to_idx[u], node_to_idx[v]) for u, v in graph.edges()]
+        h_hat_default = np.zeros(k, dtype=np.complex128)
+        h_hat_default[1:] = 1.0
 
-        best_cut = -1
+        edge_data = []
+        for u, v, data in graph.edges(data=True):
+            i = node_to_idx[u]
+            j = node_to_idx[v]
+            h_hat_edge = data.get("h_hat", h_hat_default)
+            edge_data.append((i, j, np.real(h_hat_edge)))
+
+        best_cut = -np.inf
         best_coloring = np.zeros(n, dtype=int)
 
         for coloring_tuple in iproduct(range(k), repeat=n):
-            cut = sum(
-                1 for i, j in edges if coloring_tuple[i] != coloring_tuple[j]
-            )
-            if cut > best_cut:
-                best_cut = cut
+            cost = 0.0
+            for i, j, h_hat_edge in edge_data:
+                cost += h_hat_edge[(coloring_tuple[j] - coloring_tuple[i]) % k]
+            if cost > best_cut:
+                best_cut = cost
                 best_coloring = np.array(coloring_tuple, dtype=int)
 
-        # Map back to node indices
         result = np.zeros(max(nodes) + 1, dtype=int)
         for node, idx in node_to_idx.items():
             result[node] = best_coloring[idx]
