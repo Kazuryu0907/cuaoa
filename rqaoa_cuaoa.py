@@ -40,9 +40,9 @@ def compute_expectations(sv: np.ndarray, n: int):
     """
     probs = np.abs(sv) ** 2  # (2^n,)
 
-    # ビット行列を一括生成: bit_matrix[s, k] = (s >> (n-1-k)) & 1
+    # ビット行列を一括生成: bit_matrix[s, k] = (s >> k) & 1  # FIX: CUAOA returns LSB-first SV (was MSB-first, gave wrong qubit indices)
     indices = np.arange(2 ** n, dtype=np.int64)
-    bit_matrix = ((indices[:, None] >> np.arange(n - 1, -1, -1)[None, :]) & 1).astype(np.float64)
+    bit_matrix = ((indices[:, None] >> np.arange(n)[None, :]) & 1).astype(np.float64)  # LSB-first to match CUAOA
 
     Z = 1.0 - 2.0 * bit_matrix  # (2^n, n)  0->+1, 1->-1
 

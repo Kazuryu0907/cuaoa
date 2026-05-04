@@ -205,3 +205,25 @@ cuTN の L1-RQAOA ライトコーン最適化版（`rqaoa_l1_tn.py`）では n=1
 `qaoa_large.py` — 8〜24 ノードのスケーリングベンチマーク:
 - ランダム重み付き MaxCut を複数サイズで実行
 - 16 ノード以下はブルートフォースとの近似比を算出
+
+## 重要: bit ordering バグ修正 (2026-05-04)
+
+`rqaoa_cuaoa.compute_expectations` に LSB/MSB 取り違えバグがあり修正した。
+
+- **症状**: `compute_expectations(sv, n)` 内のビット行列が
+  `bit_matrix[s, k] = (s >> (n-1-k)) & 1` (MSB-first) で構築されていたが、
+  CUAOA (custatevec) の `sim.statevector(h)` は **LSB-first** SV を返す。
+  結果として qubit インデックスが反転され (`corr_zz[i, j]` が実質
+  `<Z_{n-1-i} Z_{n-1-j}>`)、RQAOA の最大相関エッジ選択が誤エッジを指していた。
+- **影響**: 過去の CUAOA p=1 / p=2 RQAOA ベンチ結果はすべて影響あり
+  (`benchmark_3regular.py`, `benchmark_p2_density.py`,
+  `benchmark_complete_graph.py`, `benchmark_qaoa_vs_rqaoa.py` 等)。
+  bit-reversal 対称性のあるグラフ (K_{n,n}, 完全グラフ) では偶然マスクされる。
+- **修正**: 1 行 — `np.arange(n - 1, -1, -1)` → `np.arange(n)` (LSB-first)。
+- **検証**: n=4 重み非対称グラフで cuquantum_test の qaoa_statevector_np と
+  ZZ 相関子 6 ペアすべて一致 (誤差 < 1e-15)。
+- **影響範囲の数値例** (n=18, d=3-7, 5 seeds):
+  - benchmark_p2_density: ratio 0.79-0.87 → **0.99-1.00**
+  - benchmark_3regular (n=8-16): RQAOA p=1/p=2 が 0.81-0.94 → **1.000**
+- **教訓**: cuQuantum / custatevec の SV API は LSB-first 規約。
+  自前で bit 取り出しをするときは必ず単純な非対称グラフで sanity check すること。
